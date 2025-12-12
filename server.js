@@ -80,15 +80,15 @@ const db = {
 
 function autoCleanup() {
     const today = new Date().toDateString();
-    
+
     if (today !== db.lastCleanup) {
         const yesterday = new Date();
         yesterday.setDate(yesterday.getDate() - 1);
         yesterday.setHours(0, 0, 0, 0);
-        
+
         const before = db.orders.length;
         db.orders = db.orders.filter(o => new Date(o.createdAt) >= yesterday);
-        
+
         if (before !== db.orders.length) {
             console.log(`🧹 تنظيف تلقائي: حذف ${before - db.orders.length} طلب قديم`);
         }
@@ -98,6 +98,41 @@ function autoCleanup() {
 
 // تشغيل التنظيف كل ساعة
 setInterval(autoCleanup, 60 * 60 * 1000);
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 🕐 مسح جميع الطلبات الساعة 5:00 فجراً بتوقيت القدس
+// ═══════════════════════════════════════════════════════════════════════════
+
+let lastCleanupDate = '';
+
+function dailyCleanupAt5AM() {
+    // الحصول على الوقت بتوقيت القدس
+    const jerusalemTime = new Date().toLocaleString('en-US', { timeZone: 'Asia/Jerusalem' });
+    const now = new Date(jerusalemTime);
+
+    const hours = now.getHours();
+    const minutes = now.getMinutes();
+    const todayDate = now.toDateString();
+
+    // إذا كانت الساعة 5:00-5:01 فجراً ولم يتم المسح اليوم
+    if (hours === 5 && minutes < 2 && lastCleanupDate !== todayDate) {
+        const deletedCount = db.orders.length;
+        db.orders = [];
+        db.counter = 1000;
+        lastCleanupDate = todayDate;
+
+        console.log('');
+        console.log('╔════════════════════════════════════════════════════════════╗');
+        console.log('║  🧹 مسح يومي - الساعة 5:00 فجراً بتوقيت القدس              ║');
+        console.log(`║  📊 تم حذف جميع الطلبات: ${deletedCount} طلب                         ║`);
+        console.log('║  ✅ النظام جاهز ليوم جديد                                  ║');
+        console.log('╚════════════════════════════════════════════════════════════╝');
+        console.log('');
+    }
+}
+
+// فحص كل 30 ثانية للمسح الساعة 5 فجراً
+setInterval(dailyCleanupAt5AM, 30 * 1000);
 
 // ═══════════════════════════════════════════════════════════════════════════
 // 🤖 System Prompt للذكاء الاصطناعي
@@ -297,7 +332,7 @@ app.post('/api/chat', chatLimiter, async (req, res) => {
         if (!response.ok) {
             const error = await response.json().catch(() => ({}));
             console.error('OpenAI Error:', error);
-            
+
             if (response.status === 429) {
                 return res.status(429).json({
                     success: false,
@@ -305,7 +340,7 @@ app.post('/api/chat', chatLimiter, async (req, res) => {
                     error: 'RATE_LIMIT'
                 });
             }
-            
+
             throw new Error('OpenAI API Error');
         }
 
@@ -319,7 +354,7 @@ app.post('/api/chat', chatLimiter, async (req, res) => {
         if (orderMatch) {
             try {
                 const orderData = JSON.parse(orderMatch[1].trim());
-                
+
                 // إنشاء الطلب
                 const order = {
                     id: ++db.counter,
@@ -377,14 +412,14 @@ app.post('/api/chat', chatLimiter, async (req, res) => {
  */
 app.get('/api/orders', ordersLimiter, (req, res) => {
     autoCleanup();
-    
+
     const { status } = req.query;
     let orders = [...db.orders];
-    
+
     if (status && status !== 'all') {
         orders = orders.filter(o => o.status === status);
     }
-    
+
     res.json({
         success: true,
         count: orders.length,
@@ -398,7 +433,7 @@ app.get('/api/orders', ordersLimiter, (req, res) => {
  */
 app.post('/api/orders', ordersLimiter, (req, res) => {
     const { customerName, items, total, location, notes } = req.body;
-    
+
     if (!customerName || !items) {
         return res.status(400).json({
             success: false,
@@ -436,14 +471,14 @@ app.post('/api/orders', ordersLimiter, (req, res) => {
  */
 app.get('/api/orders/:id', (req, res) => {
     const order = db.orders.find(o => o.id === parseInt(req.params.id));
-    
+
     if (!order) {
         return res.status(404).json({
             success: false,
             error: 'الطلب غير موجود'
         });
     }
-    
+
     res.json({ success: true, order });
 });
 
@@ -454,7 +489,7 @@ app.get('/api/orders/:id', (req, res) => {
 app.patch('/api/orders/:id', (req, res) => {
     const { status, notes } = req.body;
     const order = db.orders.find(o => o.id === parseInt(req.params.id));
-    
+
     if (!order) {
         return res.status(404).json({
             success: false,
@@ -463,7 +498,7 @@ app.patch('/api/orders/:id', (req, res) => {
     }
 
     const validStatuses = ['new', 'preparing', 'ready', 'delivered', 'cancelled'];
-    
+
     if (status) {
         if (!validStatuses.includes(status)) {
             return res.status(400).json({
@@ -474,11 +509,11 @@ app.patch('/api/orders/:id', (req, res) => {
         order.status = status;
         console.log(`📝 تحديث #${order.id}: ${status}`);
     }
-    
+
     if (notes !== undefined) {
         order.notes = notes;
     }
-    
+
     order.updatedAt = new Date().toISOString();
 
     res.json({ success: true, order });
@@ -490,17 +525,17 @@ app.patch('/api/orders/:id', (req, res) => {
  */
 app.delete('/api/orders/:id', (req, res) => {
     const index = db.orders.findIndex(o => o.id === parseInt(req.params.id));
-    
+
     if (index === -1) {
         return res.status(404).json({
             success: false,
             error: 'الطلب غير موجود'
         });
     }
-    
+
     const deleted = db.orders.splice(index, 1)[0];
     console.log(`🗑️ حذف #${deleted.id}`);
-    
+
     res.json({ success: true, message: 'تم حذف الطلب' });
 });
 
@@ -510,11 +545,11 @@ app.delete('/api/orders/:id', (req, res) => {
  */
 app.get('/api/stats', (req, res) => {
     autoCleanup();
-    
+
     const today = new Date();
     today.setHours(0, 0, 0, 0);
     const todayOrders = db.orders.filter(o => new Date(o.createdAt) >= today);
-    
+
     res.json({
         success: true,
         stats: {
@@ -540,13 +575,13 @@ let lastKnownId = 1000;
 app.get('/api/orders/poll', (req, res) => {
     const since = parseInt(req.query.since) || lastKnownId;
     const newOrders = db.orders.filter(o => o.id > since);
-    
+
     if (newOrders.length > 0) {
         lastKnownId = Math.max(...newOrders.map(o => o.id));
-        res.json({ 
-            hasUpdates: true, 
+        res.json({
+            hasUpdates: true,
             orders: newOrders,
-            lastId: lastKnownId 
+            lastId: lastKnownId
         });
     } else {
         setTimeout(() => {
