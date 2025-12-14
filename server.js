@@ -158,6 +158,7 @@ const SYSTEM_PROMPT = `# وكيل طلبات مطعم ملك الطابون
 4. استخدم إيموجي واحد أو اثنين فقط
 5. لا تخترع أصناف غير موجودة ولا تغير الأسعار
 6. اجمع: الاسم + الطلب + المكان (داخل المحل أو بالسيارة)
+7. قم بإخبار الزبون بالسعر مع طلب التأكيد
 
 ## مهم جداً - تنسيق الطلب النهائي
 عندما يؤكد الزبون طلبه (يقول "نعم" أو "تأكيد" أو أي موافقة)، يجب أن تضيف في نهاية ردك هذا التنسيق بالضبط:
@@ -483,10 +484,43 @@ app.get('/api/orders/:id', (req, res) => {
 });
 
 /**
+ * GET /api/orders/:id/status
+ * ✅ جلب حالة الطلب والإشعارات (للعملاء)
+ */
+app.get('/api/orders/:id/status', (req, res) => {
+    const order = db.orders.find(o => o.id === parseInt(req.params.id));
+
+    if (!order) {
+        return res.status(404).json({
+            success: false,
+            error: 'الطلب غير موجود'
+        });
+    }
+
+    // إرسال حالة الطلب مع الإشعار إن وجد
+    const response = {
+        success: true,
+        orderId: order.id,
+        status: order.status,
+        statusText: {
+            'new': 'تم استلام طلبك',
+            'preparing': 'جاري تحضير طلبك',
+            'ready': 'طلبك جاهز للاستلام! 🎉',
+            'delivered': 'تم تسليم الطلب',
+            'cancelled': 'تم إلغاء الطلب'
+        }[order.status],
+        notification: order.readyNotification || null,
+        updatedAt: order.updatedAt
+    };
+
+    res.json(response);
+});
+
+/**
  * PATCH /api/orders/:id
  * تحديث حالة الطلب
  */
-app.patch('/api/orders/:id', (req, res) => {
+app.patch('/api/orders/:id', async (req, res) => {
     const { status, notes } = req.body;
     const order = db.orders.find(o => o.id === parseInt(req.params.id));
 
@@ -498,6 +532,7 @@ app.patch('/api/orders/:id', (req, res) => {
     }
 
     const validStatuses = ['new', 'preparing', 'ready', 'delivered', 'cancelled'];
+    const previousStatus = order.status;
 
     if (status) {
         if (!validStatuses.includes(status)) {
@@ -508,6 +543,46 @@ app.patch('/api/orders/:id', (req, res) => {
         }
         order.status = status;
         console.log(`📝 تحديث #${order.id}: ${status}`);
+
+        // ✅ إرسال إشعار للعميل عند الوصول لمرحلة "جاهز"
+        if (status === 'ready' && previousStatus !== 'ready') {
+            order.readyNotification = {
+                sent: true,
+                message: `🎉 تم تجهيز طلبك #${order.id}! يمكنك استلامه الآن.`,
+                timestamp: new Date().toISOString()
+            };
+            console.log(`🔔 إشعار جاهز للعميل: ${order.customerName} - طلب #${order.id}`);
+
+            // إذا كان API_KEY متاح، نرسل إشعار عبر الذكاء الاصطناعي
+            if (OPENAI_API_KEY && OPENAI_API_KEY !== 'YOUR_API_KEY_HERE') {
+                try {
+                    // إنشاء رسالة إشعار ودية
+                    const notificationPrompt = `أنت مساعد مطعم "ملك الطابون". أرسل رسالة قصيرة وودية للعميل "${order.customerName}" تخبره أن طلبه #${order.id} (${order.items}) جاهز للاستلام. استخدم اللهجة الفلسطينية. لا تزد عن سطرين.`;
+
+                    const aiResponse = await fetch('https://api.openai.com/v1/chat/completions', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Bearer ${OPENAI_API_KEY}`
+                        },
+                        body: JSON.stringify({
+                            model: 'gpt-4o-mini',
+                            messages: [{ role: 'user', content: notificationPrompt }],
+                            max_tokens: 100,
+                            temperature: 0.8
+                        })
+                    });
+
+                    if (aiResponse.ok) {
+                        const aiData = await aiResponse.json();
+                        order.readyNotification.aiMessage = aiData.choices[0].message.content;
+                        console.log(`🤖 رسالة AI: ${order.readyNotification.aiMessage}`);
+                    }
+                } catch (aiError) {
+                    console.error('AI Notification Error:', aiError.message);
+                }
+            }
+        }
     }
 
     if (notes !== undefined) {
@@ -550,12 +625,15 @@ app.get('/api/stats', (req, res) => {
     today.setHours(0, 0, 0, 0);
     const todayOrders = db.orders.filter(o => new Date(o.createdAt) >= today);
 
+    // ✅ الإيرادات تُحتسب فقط من الطلبات المسلمة (delivered)
+    const deliveredTodayOrders = todayOrders.filter(o => o.status === 'delivered');
+
     res.json({
         success: true,
         stats: {
             total: db.orders.length,
             today: todayOrders.length,
-            todayRevenue: todayOrders.reduce((sum, o) => sum + o.total, 0),
+            todayRevenue: deliveredTodayOrders.reduce((sum, o) => sum + o.total, 0),
             byStatus: {
                 new: db.orders.filter(o => o.status === 'new').length,
                 preparing: db.orders.filter(o => o.status === 'preparing').length,
